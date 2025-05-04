@@ -126,8 +126,8 @@ class PolynomialRPE(nn.Module):
         x_dist = (x_coords.unsqueeze(1) - x_coords.unsqueeze(0)).abs()
         l1_dist = y_dist + x_dist  # [num_patches, num_patches]
         
-        # Compute polynomial features
-        poly_features = torch.stack([l1_dist.pow(i) for i in range(self.degree + 1)], dim=-1)
+        # Compute polynomial features - ensure they are float tensors
+        poly_features = torch.stack([l1_dist.float().pow(i) for i in range(self.degree + 1)], dim=-1)
         
         # Calculate bias
         if self.shared_across_heads:
