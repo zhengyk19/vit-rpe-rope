@@ -25,6 +25,11 @@ def get_args():
         argparse.Namespace: Parsed arguments containing training configuration
     """
     parser = argparse.ArgumentParser(description='Vision Transformer Training')
+
+    # Directories
+    parser.add_argument('--log_dir', type=str, default='logs')
+    parser.add_argument('--ckpt_dir', type=str, default='checkpoints')
+
     # Dataset selection
     parser.add_argument('--dataset', type=str, default='mnist', choices=['mnist', 'cifar10'])
     # Positional encoding method
@@ -189,12 +194,13 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Create directories for logs and checkpoints
-    os.makedirs('logs', exist_ok=True)
-    os.makedirs('checkpoints', exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
+    os.makedirs(args.ckpt_dir, exist_ok=True)
     
     # Create log file with timestamp
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = f'logs/{args.dataset}_{args.pos_encoding}_{timestamp}.csv'
+    log_file = f'{args.log_dir}/{args.dataset}_{args.pos_encoding}_{timestamp}.csv'
+
     
     # Initialize log file with header
     with open(log_file, 'w', newline='') as f:
@@ -237,7 +243,7 @@ def main():
         # Save best model
         if test_acc > best_acc:
             best_acc = test_acc
-            torch.save(model.state_dict(), f'checkpoints/{args.dataset}_{args.pos_encoding}_best.pth')
+            torch.save(model.state_dict(), f'{args.ckpt_dir}/{args.dataset}_{args.pos_encoding}_best.pth')
         
         # Log metrics
         with open(log_file, 'a', newline='') as f:
