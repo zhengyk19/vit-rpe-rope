@@ -205,6 +205,10 @@ class RoPEAxial(nn.Module):
         # Get x and y coordinates for each position
         t_x, t_y = self.init_t_xy(grid_size, grid_size, device)
         
+        # Make sure tensors are on the correct device
+        if self.inv_freq.device != device:
+            self.inv_freq = self.inv_freq.to(device)
+        
         # Separate frequencies for x and y dimensions
         freqs_x = torch.outer(t_x, self.inv_freq)  # [seq_len, dim/4]
         freqs_y = torch.outer(t_y, self.inv_freq)  # [seq_len, dim/4]

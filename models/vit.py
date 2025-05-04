@@ -22,16 +22,17 @@ def reshape_for_broadcast(freqs_cis, x):
         torch.Tensor: Reshaped tensor for broadcasting
     """
     ndim = x.ndim
-    if freqs_cis.shape == (x.shape[1], x.shape[-1] // 2):
+    if freqs_cis.shape == (x.shape[1]-1, x.shape[-1] // 2):
         # For RoPE-Axial: [seq_len, dim/2] -> [1, seq_len, 1, dim/2]
+        # The -1 accounts for the class token which is not rotated
         return freqs_cis.unsqueeze(0).unsqueeze(2)
     elif freqs_cis.shape[0] == x.shape[0]:  # For RoPE-Mixed with num_heads as first dim
         # [num_heads, seq_len, dim/2] -> [num_heads, seq_len, 1, dim/2]
         return freqs_cis.unsqueeze(2)
     else:
-        # General case - create broadcast shape
-        shape = [d if i == 0 or i == ndim-2 or i == ndim-1 else 1 for i, d in enumerate(x.shape)]
-        return freqs_cis.view(*shape)
+        # General case - create broadcast shape based on target tensor dimensions
+        # For complex numbers, we need to ensure the last dimension is correct
+        return freqs_cis.unsqueeze(0).unsqueeze(2)
 
 def apply_rotary_emb(q, k, freqs_cis):
     """
@@ -49,13 +50,29 @@ def apply_rotary_emb(q, k, freqs_cis):
     q_real = q[:, :, 1:].float()
     k_real = k[:, :, 1:].float()
     
-    # Reshape for complex multiplication
+    # Get real shapes for debugging
+    B, H, L, D = q_real.shape
+    
     # View last dimension as complex numbers (pairs of real/imaginary)
+    # Make sure D is even for complex view
+    if D % 2 != 0:
+        raise ValueError(f"Head dimension ({D}) must be even for complex number representation")
+    
+    # Reshape for complex multiplication
     q_comp = torch.view_as_complex(q_real.reshape(*q_real.shape[:-1], -1, 2))
     k_comp = torch.view_as_complex(k_real.reshape(*k_real.shape[:-1], -1, 2))
     
-    # Reshape freqs_cis for broadcasting
-    freqs_cis = reshape_for_broadcast(freqs_cis, q_comp)
+    # Make sure freqs_cis is on the same device
+    if freqs_cis.device != q.device:
+        freqs_cis = freqs_cis.to(q.device)
+    
+    # Reshape freqs_cis for proper broadcasting
+    if freqs_cis.dim() == 2:  # [seq_len, dim/2]
+        # For RoPE-Axial
+        freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2)  # [1, seq_len, 1, dim/2]
+    elif freqs_cis.dim() == 3:  # [num_heads, seq_len, dim/2]
+        # For RoPE-Mixed
+        freqs_cis = freqs_cis.unsqueeze(2)  # [num_heads, seq_len, 1, dim/2]
     
     # Apply rotation via complex multiplication
     # z' = z * e^(i*θ) rotates complex number z by angle θ
@@ -297,8 +314,14 @@ class VisionTransformer(nn.Module):
         if self.use_rope:
             if self.pos_encoding_type == 'rope-axial':
                 freqs_cis = self.pos_embed.get_freqs_cis(h * w, x.device)
+                # Ensure freqs_cis is on the same device as x
+                if freqs_cis.device != x.device:
+                    freqs_cis = freqs_cis.to(x.device)
             elif self.pos_encoding_type == 'rope-mixed':
                 freqs_cis = self.pos_embed.get_freqs_cis(h * w, x.device)
+                # Ensure freqs_cis is on the same device as x
+                if freqs_cis.device != x.device:
+                    freqs_cis = freqs_cis.to(x.device)
         
         # Apply transformer blocks
         for blk in self.blocks:
