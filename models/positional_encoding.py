@@ -4,24 +4,26 @@ import math
 
 class AbsolutePositionalEncoding(nn.Module):
     """
-    Absolute Positional Encoding (APE)
+    Learnable Absolute Positional Encoding (APE)
     
-    Creates fixed sinusoidal position embeddings and adds them to patch embeddings.
+    Creates learnable position embeddings and adds them to patch embeddings.
     Class token doesn't receive positional encoding.
     """
     def __init__(self, d_model, max_len=5000):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
+        # Instead of fixed sinusoidal encodings, use learnable parameters
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_len, d_model))
+        # Initialize with sinusoidal values as a good starting point
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
-
+        pos_init = torch.zeros(1, max_len, d_model)
+        pos_init[0, :, 0::2] = torch.sin(position * div_term)
+        pos_init[0, :, 1::2] = torch.cos(position * div_term)
+        self.pos_embed.data.copy_(pos_init)
+        
     def forward(self, x):
         # Add positional encoding to all tokens except the class token
-        x[:, 1:] = x[:, 1:] + self.pe[:, :x.size(1)-1]
+        x[:, 1:] = x[:, 1:] + self.pos_embed[:, :x.size(1)-1]
         return x
 
 class RelativePositionalEncoding(nn.Module):
