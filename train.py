@@ -14,6 +14,8 @@ import os
 from tqdm import tqdm
 import csv
 from datetime import datetime
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 def get_args():
     """
