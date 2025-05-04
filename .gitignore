@@ -1,1 +1,5 @@
 models/models_v2_rope.py
+checkpoints/
+data/
+logs/
+models/__pycache__/

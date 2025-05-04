@@ -9,85 +9,7 @@ import math
 from timm.models.vision_transformer import PatchEmbed, Mlp
 from timm.models.layers import DropPath
 from .positional_encoding import AbsolutePositionalEncoding, RelativePositionalEncoding, PolynomialRPE, RoPEAxial, RoPEMixed
-
-def reshape_for_broadcast(freqs_cis, x):
-    """
-    Reshape frequency tensor for broadcasting with query/key tensors
-    
-    Args:
-        freqs_cis (torch.Tensor): Complex frequency tensor
-        x (torch.Tensor): Target tensor to broadcast against
-        
-    Returns:
-        torch.Tensor: Reshaped tensor for broadcasting
-    """
-    ndim = x.ndim
-    if freqs_cis.shape == (x.shape[1]-1, x.shape[-1] // 2):
-        # For RoPE-Axial: [seq_len, dim/2] -> [1, seq_len, 1, dim/2]
-        # The -1 accounts for the class token which is not rotated
-        return freqs_cis.unsqueeze(0).unsqueeze(2)
-    elif freqs_cis.shape[0] == x.shape[0]:  # For RoPE-Mixed with num_heads as first dim
-        # [num_heads, seq_len, dim/2] -> [num_heads, seq_len, 1, dim/2]
-        return freqs_cis.unsqueeze(2)
-    else:
-        # General case - create broadcast shape based on target tensor dimensions
-        # For complex numbers, we need to ensure the last dimension is correct
-        return freqs_cis.unsqueeze(0).unsqueeze(2)
-
-def apply_rotary_emb(q, k, freqs_cis):
-    """
-    Apply rotary embeddings to queries and keys using complex multiplication
-    
-    Args:
-        q (torch.Tensor): Query tensor [B, num_heads, seq_len, head_dim]
-        k (torch.Tensor): Key tensor [B, num_heads, seq_len, head_dim]
-        freqs_cis (torch.Tensor): Complex rotation tensor
-        
-    Returns:
-        tuple: (rotated_q, rotated_k) with the same shape as inputs
-    """
-    # Skip the class token (first position)
-    q_real = q[:, :, 1:].float()
-    k_real = k[:, :, 1:].float()
-    
-    # Get real shapes for debugging
-    B, H, L, D = q_real.shape
-    
-    # View last dimension as complex numbers (pairs of real/imaginary)
-    # Make sure D is even for complex view
-    if D % 2 != 0:
-        raise ValueError(f"Head dimension ({D}) must be even for complex number representation")
-    
-    # Reshape for complex multiplication
-    q_comp = torch.view_as_complex(q_real.reshape(*q_real.shape[:-1], -1, 2))
-    k_comp = torch.view_as_complex(k_real.reshape(*k_real.shape[:-1], -1, 2))
-    
-    # Make sure freqs_cis is on the same device
-    if freqs_cis.device != q.device:
-        freqs_cis = freqs_cis.to(q.device)
-    
-    # Reshape freqs_cis for proper broadcasting
-    if freqs_cis.dim() == 2:  # [seq_len, dim/2]
-        # For RoPE-Axial
-        freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2)  # [1, seq_len, 1, dim/2]
-    elif freqs_cis.dim() == 3:  # [num_heads, seq_len, dim/2]
-        # For RoPE-Mixed
-        freqs_cis = freqs_cis.unsqueeze(2)  # [num_heads, seq_len, 1, dim/2]
-    
-    # Apply rotation via complex multiplication
-    # z' = z * e^(i*θ) rotates complex number z by angle θ
-    q_out = torch.view_as_real(q_comp * freqs_cis).flatten(3)
-    k_out = torch.view_as_real(k_comp * freqs_cis).flatten(3)
-    
-    # Convert back to original dtype
-    q_out = q_out.type_as(q)
-    k_out = k_out.type_as(k)
-    
-    # Combine with class token which remains unchanged
-    q_with_cls = torch.cat([q[:, :, :1], q_out], dim=2)
-    k_with_cls = torch.cat([k[:, :, :1], k_out], dim=2)
-    
-    return q_with_cls, k_with_cls
+from .rope_utils import apply_rotary_emb, reshape_for_broadcast
 
 class Attention(nn.Module):
     """
@@ -127,11 +49,26 @@ class Attention(nn.Module):
         
         # Apply RoPE if provided - rotates q and k before computing attention
         if (isinstance(self.pos_encoding, RoPEAxial) or isinstance(self.pos_encoding, RoPEMixed)) and freqs_cis is not None:
-            # Apply rotation to queries and keys
-            q_rot, k_rot = apply_rotary_emb(q, k, freqs_cis)
+            # RoPE now returns cos, sin instead of complex tensor
+            cos, sin = freqs_cis
+            
+            # Apply rotation only to the tokens (skip class token)
+            q_cls, q_p = q[:, :, :1], q[:, :, 1:]
+            k_cls, k_p = k[:, :, :1], k[:, :, 1:]
+            
+            # Reshape cos/sin for broadcasting
+            cos = reshape_for_broadcast(cos, q_p)
+            sin = reshape_for_broadcast(sin, q_p)
+            
+            # Apply rotation using real arithmetic
+            q_p, k_p = apply_rotary_emb(q_p, k_p, cos, sin)
+            
+            # Recombine with class token
+            q = torch.cat([q_cls, q_p], dim=2)
+            k = torch.cat([k_cls, k_p], dim=2)
             
             # Compute attention scores with rotated q and k
-            attn = (q_rot @ k_rot.transpose(-2, -1)) * self.scale  # [B, num_heads, N, N]
+            attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, num_heads, N, N]
             
         else:
             # Standard attention calculation
@@ -312,16 +249,9 @@ class VisionTransformer(nn.Module):
         # For RoPE variants, precompute frequency components
         freqs_cis = None
         if self.use_rope:
-            if self.pos_encoding_type == 'rope-axial':
+            # get_freqs_cis now returns (cos, sin) tuple instead of complex tensor
+            if self.pos_encoding_type == 'rope-axial' or self.pos_encoding_type == 'rope-mixed':
                 freqs_cis = self.pos_embed.get_freqs_cis(h * w, x.device)
-                # Ensure freqs_cis is on the same device as x
-                if freqs_cis.device != x.device:
-                    freqs_cis = freqs_cis.to(x.device)
-            elif self.pos_encoding_type == 'rope-mixed':
-                freqs_cis = self.pos_embed.get_freqs_cis(h * w, x.device)
-                # Ensure freqs_cis is on the same device as x
-                if freqs_cis.device != x.device:
-                    freqs_cis = freqs_cis.to(x.device)
         
         # Apply transformer blocks
         for blk in self.blocks:

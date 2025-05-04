@@ -196,18 +196,13 @@ class RoPEAxial(nn.Module):
             device: Device to create tensors on
             
         Returns:
-            torch.Tensor: Complex tensor with cosine and sine components [seq_len, dim/2]
-                         for efficient complex multiplication during rotation
+            tuple: (cos, sin) tensors for rotary embeddings [seq_len, dim/2]
         """
         # For a typical patch-based image, we need the grid dimensions
         grid_size = int(math.sqrt(seq_len))
         
         # Get x and y coordinates for each position
         t_x, t_y = self.init_t_xy(grid_size, grid_size, device)
-        
-        # Make sure tensors are on the correct device
-        if self.inv_freq.device != device:
-            self.inv_freq = self.inv_freq.to(device)
         
         # Separate frequencies for x and y dimensions
         freqs_x = torch.outer(t_x, self.inv_freq)  # [seq_len, dim/4]
@@ -217,10 +212,11 @@ class RoPEAxial(nn.Module):
         # Each position has separate x and y frequencies
         freqs = torch.cat([freqs_x, freqs_y], dim=-1)  # [seq_len, dim/2]
         
-        # Convert to complex representation for rotation
-        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # [seq_len, dim/2]
+        # Return cosine and sine components separately
+        cos = torch.cos(freqs)
+        sin = torch.sin(freqs)
         
-        return freqs_cis
+        return cos, sin
 
 class RoPEMixed(nn.Module):
     """
@@ -297,8 +293,7 @@ class RoPEMixed(nn.Module):
             device: Device to create tensors on
             
         Returns:
-            torch.Tensor: Complex tensor with mixed frequencies 
-                         [num_heads, seq_len, dim/2]
+            tuple: (cos, sin) tensors with mixed frequencies [num_heads, seq_len, dim/2]
         """
         # For a typical patch-based image, we need the grid dimensions
         grid_size = int(math.sqrt(seq_len))
@@ -320,7 +315,11 @@ class RoPEMixed(nn.Module):
             freqs_x = freqs_x.view(seq_len, self.num_heads, -1).permute(1, 0, 2)  # [num_heads, seq_len, dim/2]
             freqs_y = freqs_y.view(seq_len, self.num_heads, -1).permute(1, 0, 2)  # [num_heads, seq_len, dim/2]
             
-            # Convert to complex representation with combined phase
-            freqs_cis = torch.polar(torch.ones_like(freqs_x), freqs_x + freqs_y)  # [num_heads, seq_len, dim/2]
+            # Calculate combined phase
+            freqs = freqs_x + freqs_y
+            
+            # Return cosine and sine components separately
+            cos = torch.cos(freqs)
+            sin = torch.sin(freqs)
         
-        return freqs_cis 
+        return cos, sin 
