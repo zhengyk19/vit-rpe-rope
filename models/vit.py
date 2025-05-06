@@ -143,7 +143,8 @@ class VisionTransformer(nn.Module):
     """
     def __init__(self, img_size=32, patch_size=4, in_chans=3, num_classes=10,
                  embed_dim=192, depth=6, num_heads=6, mlp_ratio=4.,
-                 pos_encoding='absolute', rope_theta=100.0):
+                 pos_encoding='absolute', rope_theta=100.0, 
+                 poly_degree=3, poly_shared_heads=True):
         super().__init__()
         self.num_classes = num_classes
         self.embed_dim = embed_dim
@@ -170,7 +171,8 @@ class VisionTransformer(nn.Module):
             self.use_pos_embed_in_forward = False  # Applied within attention mechanism
             self.use_rope = False
         elif pos_encoding == 'polynomial':
-            self.pos_embed = PolynomialRPE(self.num_patches, num_heads=num_heads)
+            self.pos_embed = PolynomialRPE(self.num_patches, degree=poly_degree, 
+                                          num_heads=num_heads, shared_across_heads=poly_shared_heads)
             self.use_pos_embed_in_forward = False  # Applied within attention mechanism
             self.use_rope = False
         elif pos_encoding == 'rope-axial':

@@ -38,9 +38,16 @@ def get_args():
     # RoPE theta parameter for controlling frequency bands
     parser.add_argument('--rope_theta', type=float, default=100.0,
                        help='Theta parameter for RoPE variants (lower value = higher frequency)')
+    # Polynomial-specific parameters
+    parser.add_argument('--poly_degree', type=int, default=3,
+                       help='Degree of polynomial for PolynomialRPE (default: 3)')
+    parser.add_argument('--poly_shared_heads', action='store_true', default=True,
+                       help='Share polynomial coefficients across attention heads')
+    parser.add_argument('--no-poly_shared_heads', action='store_false', dest='poly_shared_heads',
+                       help='Do not share polynomial coefficients across attention heads')
     # Training hyperparameters
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--epochs', type=int, default=30)
+    parser.add_argument('--epochs', type=int, default=25)
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--weight_decay', type=float, default=0.01)
     # Model architecture parameters
@@ -220,7 +227,9 @@ def main():
         depth=args.depth,
         num_heads=args.num_heads,
         pos_encoding=args.pos_encoding,
-        rope_theta=args.rope_theta
+        rope_theta=args.rope_theta,
+        poly_degree=args.poly_degree,
+        poly_shared_heads=args.poly_shared_heads
     ).to(device)
     
     # Initialize training components
