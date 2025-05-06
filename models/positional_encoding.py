@@ -13,13 +13,8 @@ class AbsolutePositionalEncoding(nn.Module):
         super().__init__()
         # Instead of fixed sinusoidal encodings, use learnable parameters
         self.pos_embed = nn.Parameter(torch.zeros(1, max_len, d_model))
-        # Initialize with sinusoidal values as a good starting point
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pos_init = torch.zeros(1, max_len, d_model)
-        pos_init[0, :, 0::2] = torch.sin(position * div_term)
-        pos_init[0, :, 1::2] = torch.cos(position * div_term)
-        self.pos_embed.data.copy_(pos_init)
+        # Initialize with random normal values
+        nn.init.trunc_normal_(self.pos_embed, std=.02)
         
     def forward(self, x):
         # Add positional encoding to all tokens except the class token

@@ -1,4 +1,6 @@
+.idea/
 models/models_v2_rope.py
+models/models_v2.py
 checkpoints/
 data/
 logs/
