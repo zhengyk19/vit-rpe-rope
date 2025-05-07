@@ -34,7 +34,7 @@ def get_args():
     parser.add_argument('--dataset', type=str, default='mnist', choices=['mnist', 'cifar10'])
     # Positional encoding method
     parser.add_argument('--pos_encoding', type=str, default='absolute', 
-                       choices=['absolute', 'relative', 'polynomial', 'rope-axial', 'rope-mixed'])
+                       choices=['none', 'absolute', 'relative', 'polynomial', 'rope-axial', 'rope-mixed'])
     # RoPE theta parameter for controlling frequency bands
     parser.add_argument('--rope_theta', type=float, default=100.0,
                        help='Theta parameter for RoPE variants (lower value = higher frequency)')

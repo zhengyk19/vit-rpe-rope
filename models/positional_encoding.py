@@ -2,6 +2,24 @@ import torch
 import torch.nn as nn
 import math
 
+class NoPositionalEncoding(nn.Module):
+    """
+    No Positional Encoding
+    
+    This is a placeholder module that doesn't add any positional information.
+    It's used as a baseline to evaluate the impact of positional encodings.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        
+    def forward(self, x):
+        # Pass through without modification
+        return x
+        
+    def get_bias(self):
+        # Return None to indicate no bias should be added
+        return None
+
 class AbsolutePositionalEncoding(nn.Module):
     """
     Learnable Absolute Positional Encoding (APE)
@@ -131,9 +149,18 @@ class PolynomialRPE(nn.Module):
             bias = (poly_features @ self.coefficients).unsqueeze(0)  # [1, num_patches, num_patches]
             bias = bias.expand(self.num_heads, -1, -1)  # [num_heads, num_patches, num_patches]
         else:
-            # Each head has its own polynomial
-            coeffs = self.coefficients.unsqueeze(1).unsqueeze(1)  # [num_heads, 1, 1, degree+1]
-            bias = (poly_features.unsqueeze(0) @ coeffs).squeeze(-1)  # [num_heads, num_patches, num_patches]
+            # Create a batch of polynomial features for each head
+            # Reshape the polynomial features tensor to match the coefficients dimension
+            # poly_features shape: [num_patches, num_patches, degree+1]
+            # coefficients shape: [num_heads, degree+1]
+            
+            # Method 1: Loop through each head (more readable but less efficient)
+            bias = torch.zeros(self.num_heads, self.num_patches, self.num_patches, 
+                              device=self.coefficients.device)
+            
+            for h in range(self.num_heads):
+                # Apply coefficients for this head to all positions
+                bias[h] = poly_features @ self.coefficients[h]
         
         # Add a row and column for class token
         # For simplicity, we set class token's relative position bias to 0

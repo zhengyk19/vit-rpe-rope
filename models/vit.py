@@ -8,7 +8,7 @@ import torch.nn as nn
 import math
 from timm.models.vision_transformer import PatchEmbed, Mlp
 from timm.models.layers import DropPath
-from .positional_encoding import AbsolutePositionalEncoding, RelativePositionalEncoding, PolynomialRPE, RoPEAxial, RoPEMixed
+from .positional_encoding import AbsolutePositionalEncoding, RelativePositionalEncoding, PolynomialRPE, RoPEAxial, RoPEMixed, NoPositionalEncoding
 from .rope_utils import apply_rotary_emb, reshape_for_broadcast
 
 class Attention(nn.Module):
@@ -77,16 +77,20 @@ class Attention(nn.Module):
             # Apply relative position bias if provided
             if isinstance(self.pos_encoding, RelativePositionalEncoding) or isinstance(self.pos_encoding, PolynomialRPE):
                 rel_pos_bias = self.pos_encoding.get_bias()  # [num_heads, N, N]
-                attn = attn + rel_pos_bias
+                if rel_pos_bias is not None:
+                    attn = attn + rel_pos_bias
         
         # Softmax and dropout
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
-
-        # Apply attention to values and reshape back
+        
+        # Apply attention weights to values
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        
+        # Final projection
         x = self.proj(x)
         x = self.proj_drop(x)
+        
         return x
     
     def set_pos_encoding(self, pos_encoding):
@@ -183,6 +187,10 @@ class VisionTransformer(nn.Module):
             self.pos_embed = RoPEMixed(self.head_dim, num_heads=num_heads, theta=rope_theta)
             self.use_pos_embed_in_forward = False  # Applied within attention mechanism
             self.use_rope = True
+        elif pos_encoding == 'none':
+            self.pos_embed = NoPositionalEncoding()
+            self.use_pos_embed_in_forward = False  # No positional encoding
+            self.use_rope = False
         else:
             raise ValueError(f"Unknown positional encoding type: {pos_encoding}")
         
