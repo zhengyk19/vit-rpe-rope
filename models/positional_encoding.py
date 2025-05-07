@@ -95,9 +95,11 @@ class PolynomialRPE(nn.Module):
         
         # Initialize polynomial coefficients
         if shared_across_heads:
-            self.coefficients = nn.Parameter(torch.randn(degree + 1))
+            self.coefficients = nn.Parameter(torch.zeros(degree + 1))
+            nn.init.trunc_normal_(self.coefficients, std=0.02)
         else:
-            self.coefficients = nn.Parameter(torch.randn(num_heads, degree + 1))
+            self.coefficients = nn.Parameter(torch.zeros(num_heads, degree + 1))
+            nn.init.trunc_normal_(self.coefficients, std=0.02)
         
     def forward(self, x):
         # This module doesn't modify x directly
