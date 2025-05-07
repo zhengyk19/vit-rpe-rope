@@ -48,6 +48,8 @@ def get_args():
                        help='Head indices to visualize for RoPE-Mixed (default: [0])')
     parser.add_argument('--compare_thetas', action='store_true',
                        help='Compare different theta values for sensitivity analysis')
+    parser.add_argument('--compare_models', action='store_true',
+                       help='Compare Axial and Mixed models side by side')
     parser.add_argument('--theta_values', type=float, nargs='+', 
                         default=[10.0, 100.0, 1000.0],
                         help='Theta values to compare (default: [10.0, 100.0, 1000.0])')
@@ -60,6 +62,10 @@ def get_args():
     parser.add_argument('--model_config', type=str, default='rope-mixed',
                        choices=['rope-axial', 'rope-mixed'],
                        help='Positional encoding method of the model')
+    parser.add_argument('--axial_model', type=str, default=None,
+                       help='Path to RoPE-Axial model checkpoint for comparison')
+    parser.add_argument('--mixed_model', type=str, default=None,
+                       help='Path to RoPE-Mixed model checkpoint for comparison')
     
     # Output settings
     parser.add_argument('--output_dir', type=str, default='visualizations',
@@ -282,6 +288,83 @@ def load_trained_model(model_path, model_config, num_heads=4, dim=64, theta_axia
         print(f"Error loading model: {e}")
         return None
 
+def compare_rope_models(axial_model, mixed_model, input_positions, args, head_idx=0, cmap=None, timestamp=None, model_name="comparison"):
+    """
+    Compare two different RoPE models (Axial and Mixed) side by side.
+    
+    Args:
+        axial_model: The RoPEAxial model to visualize
+        mixed_model: The RoPEMixed model to visualize
+        input_positions (torch.Tensor): Input position grid for visualization
+        args: Command-line arguments containing visualization parameters
+        head_idx (int): Head index to use for Mixed model
+        cmap: Colormap to use for visualization
+        timestamp (str): Timestamp for output filename
+        model_name (str): Base name for output file
+        
+    Returns:
+        str: Path to the saved visualization file
+    """
+    # Apply RoPE and FFT for both models
+    axial_freqs, axial_recon = apply_rope_and_fft(input_positions, axial_model)
+    mixed_freqs, mixed_recon = apply_rope_and_fft(input_positions, mixed_model, head_idx=head_idx)
+    
+    # Create a figure for visualization
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    
+    # Input positions (shared for both models)
+    axes[0, 0].imshow(input_positions.numpy(), cmap='viridis')
+    axes[0, 0].set_title('Input Positions')
+    axes[0, 0].axis('off')
+    
+    # Axial model results
+    im_axial_freq = axes[0, 1].imshow(axial_freqs, cmap=cmap)
+    axes[0, 1].set_title(f'Axial Frequencies')
+    axes[0, 1].axis('off')
+    
+    axes[0, 2].imshow(axial_recon, cmap='viridis')
+    axes[0, 2].set_title('Axial Reconstruction')
+    axes[0, 2].axis('off')
+    
+    # Mixed model results
+    axes[1, 0].imshow(input_positions.numpy(), cmap='viridis')
+    axes[1, 0].set_title('Input Positions')
+    axes[1, 0].axis('off')
+    
+    im_mixed_freq = axes[1, 1].imshow(mixed_freqs, cmap=cmap)
+    head_title = f'Mixed Head {head_idx}' if hasattr(mixed_model, 'num_heads') and mixed_model.num_heads > 1 else 'Mixed'
+    axes[1, 1].set_title(f'{head_title} Frequencies')
+    axes[1, 1].axis('off')
+    
+    axes[1, 2].imshow(mixed_recon, cmap='viridis')
+    axes[1, 2].set_title('Mixed Reconstruction')
+    axes[1, 2].axis('off')
+    
+    # Add colorbars
+    fig.colorbar(im_axial_freq, ax=axes[0, 1], fraction=0.046, pad=0.04)
+    fig.colorbar(im_mixed_freq, ax=axes[1, 1], fraction=0.046, pad=0.04)
+    
+    # Fine-tune layout
+    plt.tight_layout()
+    
+    # Add figure title
+    pattern_name = "Custom" if not hasattr(input_positions, 'pattern') else input_positions.pattern.capitalize()
+    fig.suptitle(f"RoPE Model Comparison - Pattern: {pattern_name}", fontsize=16, y=1.02)
+    
+    # Save the figure
+    if timestamp is None:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    head_suffix = f"_head{head_idx}" if hasattr(mixed_model, 'num_heads') and mixed_model.num_heads > 1 else ""
+    output_path = f"{args.output_dir}/rope_comparison_{model_name}_{pattern_name}{head_suffix}_{timestamp}.png"
+    plt.savefig(output_path, dpi=args.dpi, bbox_inches='tight')
+    print(f"Saved model comparison to {output_path}")
+    
+    # Close the figure to free memory
+    plt.close(fig)
+    
+    return output_path
+
 def visualize_rope_frequencies(args):
     """
     Create visualizations of RoPE frequency representations.
@@ -299,14 +382,45 @@ def visualize_rope_frequencies(args):
     # Get colormap
     cmap = create_colormap(args.cmap)
     
-    # Get model basename for output filename
-    if args.load_model and args.model_path:
-        model_name = os.path.splitext(os.path.basename(args.model_path))[0]
-    else:
-        model_name = "default"
+    # Handle different model loading scenarios
+    model_name = "default"
     
-    # Set up RoPE encoders
-    if args.load_model and args.model_path:
+    # Check if explicit axial and mixed models are provided
+    if args.axial_model and args.mixed_model:
+        print(f"Loading Axial model from: {args.axial_model}")
+        print(f"Loading Mixed model from: {args.mixed_model}")
+        
+        rope_axial = load_trained_model(
+            model_path=args.axial_model,
+            model_config='rope-axial',
+            num_heads=args.num_heads,
+            dim=args.dim,
+            theta_axial=args.theta_axial,
+            theta_mixed=args.theta_mixed,
+            device=device
+        )
+        
+        rope_mixed = load_trained_model(
+            model_path=args.mixed_model,
+            model_config='rope-mixed',
+            num_heads=args.num_heads,
+            dim=args.dim,
+            theta_axial=args.theta_axial,
+            theta_mixed=args.theta_mixed,
+            device=device
+        )
+        
+        if rope_axial is None or rope_mixed is None:
+            print("One or both models failed to load. Exiting without visualization.")
+            return
+        
+        model_name = "comparison"
+        use_both_encoders = True
+    
+    # Handle single model loading
+    elif args.load_model and args.model_path:
+        model_name = os.path.splitext(os.path.basename(args.model_path))[0]
+        
         # Load encoders from trained model
         encoder = load_trained_model(
             model_path=args.model_path, 
@@ -336,7 +450,41 @@ def visualize_rope_frequencies(args):
         rope_axial = RoPEAxial(dim=args.dim, theta=args.theta_axial).to(device)
         rope_mixed = RoPEMixed(dim=args.dim, num_heads=args.num_heads, theta=args.theta_mixed).to(device)
         use_both_encoders = True
-    
+
+    # Add new argument to indicate if we should use the comparison function
+    if hasattr(args, 'compare_models') and args.compare_models and use_both_encoders:
+        # Use the new comparison function for each pattern
+        for pattern in args.patterns:
+            # Handle custom pattern
+            if pattern == 'custom' and args.custom_pattern:
+                custom_coords = args.custom_pattern.split(',')
+                input_positions = create_input_positions(pattern, args.grid_size, custom_coords)
+            else:
+                input_positions = create_input_positions(pattern, args.grid_size)
+            
+            # Store the pattern name for reference
+            input_positions.pattern = pattern
+            
+            # For Mixed, compare for each specified head
+            for head_idx in args.head_indices:
+                if hasattr(rope_mixed, 'num_heads') and head_idx >= rope_mixed.num_heads:
+                    continue
+                
+                compare_rope_models(
+                    axial_model=rope_axial,
+                    mixed_model=rope_mixed,
+                    input_positions=input_positions,
+                    args=args,
+                    head_idx=head_idx,
+                    cmap=cmap,
+                    timestamp=timestamp,
+                    model_name=model_name
+                )
+        
+        # If comparison mode is active and both models are available, return after comparison
+        if rope_axial is not None and rope_mixed is not None:
+            return
+
     # Process each test position pattern
     for pattern in args.patterns:
         # Handle custom pattern

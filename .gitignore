@@ -6,3 +6,4 @@ data/
 logs/
 models/__pycache__/
 visualizations/
+report/
