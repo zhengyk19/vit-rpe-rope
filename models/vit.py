@@ -155,6 +155,7 @@ class VisionTransformer(nn.Module):
         self.patch_size = patch_size
         self.pos_encoding_type = pos_encoding
         self.head_dim = embed_dim // num_heads
+        self.num_heads = num_heads
         
         # Calculate number of patches
         self.num_patches = (img_size // patch_size) ** 2
@@ -180,11 +181,11 @@ class VisionTransformer(nn.Module):
             self.use_pos_embed_in_forward = False  # Applied within attention mechanism
             self.use_rope = False
         elif pos_encoding == 'rope-axial':
-            self.pos_embed = RoPEAxial(self.head_dim, theta=rope_theta)
+            self.pos_embed = RoPEAxial(dim=self.head_dim, theta=rope_theta)
             self.use_pos_embed_in_forward = False  # Applied within attention mechanism
             self.use_rope = True
         elif pos_encoding == 'rope-mixed':
-            self.pos_embed = RoPEMixed(self.head_dim, num_heads=num_heads, theta=rope_theta)
+            self.pos_embed = RoPEMixed(dim=self.head_dim, num_heads=num_heads, theta=rope_theta)
             self.use_pos_embed_in_forward = False  # Applied within attention mechanism
             self.use_rope = True
         elif pos_encoding == 'none':

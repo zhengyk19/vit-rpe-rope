@@ -132,6 +132,7 @@ def apply_rope_and_fft(pos_grid, rope_encoder, head_idx=0):
     Returns:
         tuple: (frequency representation after FFT, reconstructed positions after iFFT)
     """
+    print("Using encoder:", rope_encoder.__class__.__name__)
     grid_size = pos_grid.shape[0]
     seq_len = grid_size * grid_size
     
@@ -142,23 +143,30 @@ def apply_rope_and_fft(pos_grid, rope_encoder, head_idx=0):
         device = torch.device('cpu')
     
     # Flatten the grid to sequence format
-    seq_positions = pos_grid.flatten().unsqueeze(0)  # [1, seq_len]
+    seq = pos_grid.flatten().to(device)  # [seq_len]
     
     # Get frequency components
     if isinstance(rope_encoder, RoPEAxial):
         cos, sin = rope_encoder.get_freqs_cis(seq_len, device)
-        # RoPE-Axial returns [seq_len, dim/2] tensors
-        freqs = cos.detach().cpu().numpy()  # Just use cosine component for visualization
+        # Mask the frequencies with input positions
+        cos_masked = seq[:, None] * cos  # [seq_len, dim/2]
+        sin_masked = seq[:, None] * sin  # [seq_len, dim/2]
     else:
         cos, sin = rope_encoder.get_freqs_cis(seq_len, device)
-        # RoPE-Mixed returns [num_heads, seq_len, dim/2] tensors
-        freqs = cos[head_idx].detach().cpu().numpy()  # Use a specific head
+        # Get specific head and mask with input positions
+        cos_head = cos[head_idx]  # [seq_len, dim/2]
+        sin_head = sin[head_idx]  # [seq_len, dim/2]
+        cos_masked = seq[:, None] * cos_head
+        sin_masked = seq[:, None] * sin_head
     
-    # Reshape frequencies to 2D grid for visualization
-    freq_grid = np.mean(freqs, axis=-1).reshape(grid_size, grid_size)
+    # Create complex values using both cosine and sine components
+    complex_vals = cos_masked + 1j * sin_masked
+    
+    # Convert to numpy and mean across frequency dimension
+    complex_grid = np.mean(complex_vals.detach().cpu().numpy(), axis=-1).reshape(grid_size, grid_size)
     
     # Apply 2D FFT
-    fft_result = np.fft.fft2(freq_grid)
+    fft_result = np.fft.fft2(complex_grid)
     fft_shifted = np.fft.fftshift(fft_result)
     
     # Apply inverse FFT to see representation quality
@@ -171,7 +179,7 @@ def apply_rope_and_fft(pos_grid, rope_encoder, head_idx=0):
     
     return magnitude_log, reconstructed
 
-def load_trained_model(model_path, model_config, num_heads=4, device='cpu'):
+def load_trained_model(model_path, model_config, num_heads=4, dim=64, theta_axial=100.0, theta_mixed=10.0, device='cpu'):
     """
     Load a trained model to extract its RoPE encoder.
     
@@ -179,31 +187,97 @@ def load_trained_model(model_path, model_config, num_heads=4, device='cpu'):
         model_path (str): Path to the model checkpoint
         model_config (str): Positional encoding method
         num_heads (int): Number of attention heads
+        dim (int): Embedding dimension
+        theta_axial (float): Theta parameter for RoPE-Axial
+        theta_mixed (float): Theta parameter for RoPE-Mixed
         device (str): Device to load the model on
         
     Returns:
-        nn.Module: RoPE encoder from the trained model
+        nn.Module: RoPE encoder from the trained model, or None if loading fails
     """
     if not os.path.exists(model_path):
         print(f"Error: Model file not found at {model_path}")
         return None
     
     try:
-        # Load the model checkpoint
+        # Load the model checkpoint to inspect its structure
         checkpoint = torch.load(model_path, map_location=device)
         
-        # Create a temporary model with the same config to load the state dict
-        model = VisionTransformer(
-            pos_encoding=model_config,
-            num_heads=num_heads
-        ).to(device)
+        # Extract dimension and number of heads from the checkpoint
+        model_dim = None
+        model_heads = None
         
-        # Load the state dictionary
-        model.load_state_dict(checkpoint)
+        # Examine the checkpoint structure to determine the dimensions
+        for key, value in checkpoint.items():
+            if key == 'patch_embed.weight':
+                # Patch embedding weight has shape [embed_dim, in_chans, patch_size, patch_size]
+                model_dim = value.shape[0]
+            elif key.endswith('.qkv.weight'):
+                # QKV weight has shape [3*embed_dim, embed_dim]
+                model_dim = value.shape[1]
+            elif key.endswith('.qkv.bias'):
+                # QKV bias has shape [3*embed_dim]
+                model_dim = value.shape[0] // 3
+            elif 'pos_embed.inv_freq' in key:
+                # inv_freq is [dim//2]
+                model_dim = value.shape[0] * 2
+            
+            # For RoPE-Mixed, try to determine number of heads
+            if model_config == 'rope-mixed' and 'pos_embed.freqs' in key:
+                if len(value.shape) >= 1:
+                    model_heads = value.shape[0]
+            
+            # Break once we have both dimensions
+            if model_dim is not None and (model_config == 'rope-axial' or model_heads is not None):
+                break
         
-        # Extract the RoPE encoder
-        encoder = model.pos_embed
-        return encoder
+        # If we couldn't determine dimensions, try to get them from error message
+        if model_dim is None:
+            # Create a temporary model with default dimensions
+            temp_model = VisionTransformer(
+                pos_encoding=model_config,
+                num_heads=num_heads
+            ).to(device)
+            
+            try:
+                # Try loading and catch the error to extract dimensions
+                temp_model.load_state_dict(checkpoint)
+            except RuntimeError as e:
+                # Parse error message to extract dimensions
+                error_msg = str(e)
+                import re
+                
+                # Look for dimension mismatches in the error
+                dim_matches = re.findall(r'size mismatch for .*: copying a param with shape torch.Size\(\[(.*)\]\)', error_msg)
+                if dim_matches:
+                    if model_config == 'rope-axial' and 'inv_freq' in error_msg:
+                        # inv_freq is [dim//2]
+                        model_dim = int(dim_matches[0]) * 2
+                    elif model_config == 'rope-mixed' and 'freqs' in error_msg:
+                        # freqs is [num_heads, seq_len, dim//2]
+                        parts = dim_matches[0].split(', ')
+                        if len(parts) >= 3:
+                            model_heads = int(parts[0])
+                            model_dim = int(parts[2]) * 2
+        
+        # If we still couldn't determine dimensions, use arguments
+        if model_dim is None:
+            print("Warning: Could not determine model dimensions from checkpoint")
+            model_dim = dim  # Use provided dimension
+        
+        if model_config == 'rope-mixed' and model_heads is None:
+            print("Warning: Could not determine number of heads from checkpoint")
+            model_heads = num_heads  # Use provided value
+        
+        print(f"Creating model with dim={model_dim}" + 
+              (f", heads={model_heads}" if model_config == 'rope-mixed' else ""))
+        
+        # Create a model with matching dimensions
+        if model_config == 'rope-axial':
+            return RoPEAxial(dim=model_dim, theta=theta_axial).to(device)
+        else:
+            return RoPEMixed(dim=model_dim, num_heads=model_heads, theta=theta_mixed).to(device)
+    
     except Exception as e:
         print(f"Error loading model: {e}")
         return None
@@ -225,26 +299,43 @@ def visualize_rope_frequencies(args):
     # Get colormap
     cmap = create_colormap(args.cmap)
     
+    # Get model basename for output filename
+    if args.load_model and args.model_path:
+        model_name = os.path.splitext(os.path.basename(args.model_path))[0]
+    else:
+        model_name = "default"
+    
     # Set up RoPE encoders
     if args.load_model and args.model_path:
         # Load encoders from trained model
-        encoder = load_trained_model(args.model_path, args.model_config, args.num_heads, device)
+        encoder = load_trained_model(
+            model_path=args.model_path, 
+            model_config=args.model_config, 
+            num_heads=args.num_heads, 
+            dim=args.dim, 
+            theta_axial=args.theta_axial, 
+            theta_mixed=args.theta_mixed, 
+            device=device
+        )
         if encoder is None:
-            print("Falling back to default encoders...")
-            rope_axial = RoPEAxial(dim=args.dim, theta=args.theta_axial).to(device)
-            rope_mixed = RoPEMixed(dim=args.dim, num_heads=args.num_heads, theta=args.theta_mixed).to(device)
+            print("Model loading failed. Exiting without visualization.")
+            return
         else:
             print(f"Successfully loaded RoPE encoder from model: {args.model_path}")
             if args.model_config == 'rope-axial':
                 rope_axial = encoder
-                rope_mixed = RoPEMixed(dim=args.dim, num_heads=args.num_heads, theta=args.theta_mixed).to(device)
+                rope_mixed = None
+                use_both_encoders = False
             else:
                 rope_mixed = encoder
-                rope_axial = RoPEAxial(dim=args.dim, theta=args.theta_axial).to(device)
+                rope_axial = None
+                use_both_encoders = False
     else:
-        # Use default encoders
+        # Use default encoders for visualization and comparison
+        print("Using default encoders")
         rope_axial = RoPEAxial(dim=args.dim, theta=args.theta_axial).to(device)
         rope_mixed = RoPEMixed(dim=args.dim, num_heads=args.num_heads, theta=args.theta_mixed).to(device)
+        use_both_encoders = True
     
     # Process each test position pattern
     for pattern in args.patterns:
@@ -255,19 +346,134 @@ def visualize_rope_frequencies(args):
         else:
             input_positions = create_input_positions(pattern, args.grid_size)
         
-        # Apply RoPE and FFT
-        axial_freqs, axial_recon = apply_rope_and_fft(input_positions, rope_axial)
-        
-        # Create visualization for each head if using mixed
-        for head_idx in args.head_indices:
-            if head_idx >= args.num_heads:
+        # Apply RoPE and FFT based on the loaded model type
+        if use_both_encoders:
+            # Using both encoders for comparison
+            axial_freqs, axial_recon = apply_rope_and_fft(input_positions, rope_axial)
+            
+            # Create visualization for each head if using mixed
+            for head_idx in args.head_indices:
+                if head_idx >= args.num_heads:
+                    continue
+                    
+                # For Mixed, visualize the specified head
+                mixed_freqs, mixed_recon = apply_rope_and_fft(input_positions, rope_mixed, head_idx=head_idx)
+                
+                # Create a figure for visualization
+                fig, axes = plt.subplots(1, 5, figsize=(20, 4))
+                
+                # Plot input positions
+                axes[0].imshow(input_positions.numpy(), cmap='viridis')
+                axes[0].set_title('Input Positions')
+                axes[0].axis('off')
+                
+                # Add FFT & iFFT arrow
+                axes[1].axis('off')
+                axes[1].text(0.5, 0.5, 'FFT\n&\niFFT', ha='center', va='center', fontsize=14)
+                axes[1].set_title('')
+                
+                # Plot Axial frequencies
+                im_axial = axes[2].imshow(axial_freqs, cmap=cmap)
+                axes[2].set_title(f'Axial (θ={args.theta_axial})')
+                axes[2].axis('off')
+                
+                # Plot Mixed frequencies
+                im_mixed = axes[3].imshow(mixed_freqs, cmap=cmap)
+                head_title = f'Mixed Head {head_idx}' if len(args.head_indices) > 1 else 'Mixed'
+                axes[3].set_title(f'{head_title} (θ={args.theta_mixed})')
+                axes[3].axis('off')
+                
+                # Add visualization of reconstruction
+                axes[4].imshow(mixed_recon, cmap='viridis')
+                axes[4].set_title('Reconstruction')
+                axes[4].axis('off')
+                
+                # Add colorbar
+                fig.colorbar(im_mixed, ax=axes[3], fraction=0.046, pad=0.04)
+                fig.colorbar(im_axial, ax=axes[2], fraction=0.046, pad=0.04)
+                
+                # Fine-tune layout
+                plt.tight_layout()
+                
+                # Add figure title
+                model_info = f"From model: {model_name}"
+                fig.suptitle(f"RoPE Frequency Visualization - Pattern: {pattern.capitalize()}\n{model_info}", 
+                            fontsize=14, y=1.05)
+                
+                # Save the figure
+                head_suffix = f"_head{head_idx}" if len(args.head_indices) > 1 else ""
+                output_path = f"{args.output_dir}/rope_freq_{model_name}_{pattern}{head_suffix}_{timestamp}.png"
+                plt.savefig(output_path, dpi=args.dpi, bbox_inches='tight')
+                print(f"Saved visualization for '{pattern}' pattern (head {head_idx}) to {output_path}")
+                
+                # Close the figure to free memory
+                plt.close(fig)
+        else:
+            # Using only the loaded model's encoder
+            if args.model_config == 'rope-axial':
+                model_freqs, model_recon = apply_rope_and_fft(input_positions, rope_axial)
+                encoder_name = 'Axial'
+                theta = args.theta_axial
+                head_idx = None
+            else:
+                # For RoPE-Mixed models, create visualization for each requested head
+                for head_idx in args.head_indices:
+                    if head_idx >= args.num_heads:
+                        continue
+                        
+                    model_freqs, model_recon = apply_rope_and_fft(input_positions, rope_mixed, head_idx=head_idx)
+                    encoder_name = f'Mixed Head {head_idx}' if len(args.head_indices) > 1 else 'Mixed'
+                    theta = args.theta_mixed
+                    
+                    # Create a figure for visualization
+                    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+                    
+                    # Plot input positions
+                    axes[0].imshow(input_positions.numpy(), cmap='viridis')
+                    axes[0].set_title('Input Positions')
+                    axes[0].axis('off')
+                    
+                    # Add FFT & iFFT arrow
+                    axes[1].axis('off')
+                    axes[1].text(0.5, 0.5, 'FFT\n&\niFFT', ha='center', va='center', fontsize=14)
+                    axes[1].set_title('')
+                    
+                    # Plot model frequencies
+                    im_model = axes[2].imshow(model_freqs, cmap=cmap)
+                    axes[2].set_title(f'{encoder_name} (θ={theta})')
+                    axes[2].axis('off')
+                    
+                    # Add visualization of reconstruction
+                    axes[3].imshow(model_recon, cmap='viridis')
+                    axes[3].set_title('Reconstruction')
+                    axes[3].axis('off')
+                    
+                    # Add colorbar
+                    fig.colorbar(im_model, ax=axes[2], fraction=0.046, pad=0.04)
+                    
+                    # Fine-tune layout
+                    plt.tight_layout()
+                    
+                    # Add figure title
+                    model_info = f"From model: {model_name}"
+                    fig.suptitle(f"RoPE Frequency Visualization - Pattern: {pattern.capitalize()}\n{model_info}", 
+                                fontsize=14, y=1.05)
+                    
+                    # Save the figure
+                    head_suffix = f"_head{head_idx}" if len(args.head_indices) > 1 else ""
+                    output_path = f"{args.output_dir}/rope_freq_{model_name}_{pattern}{head_suffix}_{timestamp}.png"
+                    plt.savefig(output_path, dpi=args.dpi, bbox_inches='tight')
+                    print(f"Saved visualization for '{pattern}' pattern (head {head_idx}) to {output_path}")
+                    
+                    # Close the figure to free memory
+                    plt.close(fig)
+                
+                # Skip the rest of the loop for Mixed models since we've handled all heads
                 continue
                 
-            # For Mixed, visualize the specified head
-            mixed_freqs, mixed_recon = apply_rope_and_fft(input_positions, rope_mixed, head_idx=head_idx)
-            
+            # For Axial models
             # Create a figure for visualization
-            fig, axes = plt.subplots(1, 5, figsize=(20, 4))
+            fig, axes = plt.subplots(1, 4, figsize=(16, 4))
             
             # Plot input positions
             axes[0].imshow(input_positions.numpy(), cmap='viridis')
@@ -279,48 +485,40 @@ def visualize_rope_frequencies(args):
             axes[1].text(0.5, 0.5, 'FFT\n&\niFFT', ha='center', va='center', fontsize=14)
             axes[1].set_title('')
             
-            # Plot Axial frequencies
-            im_axial = axes[2].imshow(axial_freqs, cmap=cmap)
-            axes[2].set_title(f'Axial (θ={args.theta_axial})')
+            # Plot model frequencies
+            im_model = axes[2].imshow(model_freqs, cmap=cmap)
+            axes[2].set_title(f'{encoder_name} (θ={theta})')
             axes[2].axis('off')
             
-            # Plot Mixed frequencies
-            im_mixed = axes[3].imshow(mixed_freqs, cmap=cmap)
-            head_title = f'Mixed Head {head_idx}' if len(args.head_indices) > 1 else 'Mixed'
-            axes[3].set_title(f'{head_title} (θ={args.theta_mixed})')
+            # Add visualization of reconstruction
+            axes[3].imshow(model_recon, cmap='viridis')
+            axes[3].set_title('Reconstruction')
             axes[3].axis('off')
             
-            # Add visualization of reconstruction
-            axes[4].imshow(mixed_recon, cmap='viridis')
-            axes[4].set_title('Reconstruction')
-            axes[4].axis('off')
-            
             # Add colorbar
-            fig.colorbar(im_mixed, ax=axes[3], fraction=0.046, pad=0.04)
-            fig.colorbar(im_axial, ax=axes[2], fraction=0.046, pad=0.04)
+            fig.colorbar(im_model, ax=axes[2], fraction=0.046, pad=0.04)
             
             # Fine-tune layout
             plt.tight_layout()
             
             # Add figure title
-            model_info = f"From model: {os.path.basename(args.model_path)}" if args.load_model else "Default parameters"
+            model_info = f"From model: {model_name}"
             fig.suptitle(f"RoPE Frequency Visualization - Pattern: {pattern.capitalize()}\n{model_info}", 
                         fontsize=14, y=1.05)
             
             # Save the figure
-            head_suffix = f"_head{head_idx}" if len(args.head_indices) > 1 else ""
-            output_path = f"{args.output_dir}/rope_freq_{pattern}{head_suffix}_{timestamp}.png"
+            output_path = f"{args.output_dir}/rope_freq_{model_name}_{pattern}_{timestamp}.png"
             plt.savefig(output_path, dpi=args.dpi, bbox_inches='tight')
-            print(f"Saved visualization for '{pattern}' pattern (head {head_idx}) to {output_path}")
+            print(f"Saved visualization for '{pattern}' pattern to {output_path}")
             
             # Close the figure to free memory
             plt.close(fig)
     
     # Create theta comparison if requested
     if args.compare_thetas:
-        visualize_theta_comparison(args, cmap, timestamp)
+        visualize_theta_comparison(args, cmap, timestamp, model_name)
 
-def visualize_theta_comparison(args, cmap, timestamp):
+def visualize_theta_comparison(args, cmap, timestamp, model_name="default"):
     """Create visualizations comparing different theta values for RoPE."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -382,7 +580,7 @@ def visualize_theta_comparison(args, cmap, timestamp):
                 fontsize=16, y=1.02)
     
     # Save the figure
-    output_path = f"{args.output_dir}/rope_theta_comparison_{timestamp}.png"
+    output_path = f"{args.output_dir}/rope_theta_comparison_{model_name}_{timestamp}.png"
     plt.savefig(output_path, dpi=args.dpi, bbox_inches='tight')
     print(f"Saved theta comparison to {output_path}")
     plt.close(fig)
