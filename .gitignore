@@ -7,3 +7,5 @@ logs/
 models/__pycache__/
 visualizations/
 report/
+results/
+venv/

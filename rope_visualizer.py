@@ -1,12 +1,14 @@
-#!/usr/bin/env python
 """
-RoPE Frequency Visualizer - A tool to visualize and compare different RoPE variants.
+RoPE Visualizer - Advanced Tool for Visualizing Rotary Position Encoding
 
-This script provides a user-friendly interface to:
-1. Visualize Rotary Position Encoding (RoPE) frequency patterns
-2. Compare Axial and Mixed variants
-3. Examine different input patterns and their frequency representations
-4. Optionally load trained models to visualize their learned frequencies
+This module provides comprehensive visualization tools for analyzing and comparing 
+frequency patterns of different RoPE (Rotary Position Encoding) variants, including
+Axial and Mixed implementations. It supports various input patterns, theta parameter
+analysis, and trained model visualization.
+
+The visualizer offers insights into how different RoPE implementations encode spatial
+information in transformer-based vision models, helping to understand their representational
+capabilities and differences.
 """
 
 import torch
@@ -21,10 +23,10 @@ from datetime import datetime
 import seaborn as sns
 
 def get_args():
-    """Parse command-line arguments for the visualization tool."""
+    """Parse command-line arguments for visualization settings."""
     parser = argparse.ArgumentParser(description='RoPE Frequency Visualization Tool')
     
-    # Basic visualization settings
+    # Configuration for visualization
     parser.add_argument('--grid_size', type=int, default=8, 
                         help='Size of grid for visualization (default: 8)')
     parser.add_argument('--dim', type=int, default=64, 
@@ -36,25 +38,23 @@ def get_args():
     parser.add_argument('--num_heads', type=int, default=4,
                        help='Number of attention heads for RoPE-Mixed (default: 4)')
     
-    # Test position patterns
+    # Input position pattern configurations
     parser.add_argument('--patterns', type=str, nargs='+', 
                         default=['single', 'double', 'corner', 'diagonal'],
                         help='Test position patterns (options: single, double, corner, diagonal, custom)')
     parser.add_argument('--custom_pattern', type=str, default=None,
                        help='Custom pattern as comma-separated list of coordinates "row1,col1,row2,col2,..."')
     
-    # Advanced options
+    # Advanced visualization options
     parser.add_argument('--head_indices', type=int, nargs='+', default=[0],
                        help='Head indices to visualize for RoPE-Mixed (default: [0])')
     parser.add_argument('--compare_thetas', action='store_true',
                        help='Compare different theta values for sensitivity analysis')
-    parser.add_argument('--compare_models', action='store_true',
-                       help='Compare Axial and Mixed models side by side')
     parser.add_argument('--theta_values', type=float, nargs='+', 
                         default=[10.0, 100.0, 1000.0],
                         help='Theta values to compare (default: [10.0, 100.0, 1000.0])')
     
-    # Model loading
+    # Model loading parameters
     parser.add_argument('--load_model', action='store_true',
                        help='Load a trained model to visualize its learned frequencies')
     parser.add_argument('--model_path', type=str, default=None,
@@ -62,12 +62,16 @@ def get_args():
     parser.add_argument('--model_config', type=str, default='rope-mixed',
                        choices=['rope-axial', 'rope-mixed'],
                        help='Positional encoding method of the model')
-    parser.add_argument('--axial_model', type=str, default=None,
-                       help='Path to RoPE-Axial model checkpoint for comparison')
-    parser.add_argument('--mixed_model', type=str, default=None,
-                       help='Path to RoPE-Mixed model checkpoint for comparison')
     
-    # Output settings
+    # Comparative model analysis
+    parser.add_argument('--compare_models', action='store_true',
+                       help='Compare two models (Axial and Mixed) side by side')
+    parser.add_argument('--axial_model_path', type=str, default=None,
+                       help='Path to the RoPE-Axial model checkpoint')
+    parser.add_argument('--mixed_model_path', type=str, default=None,
+                       help='Path to the RoPE-Mixed model checkpoint')
+    
+    # Output configuration
     parser.add_argument('--output_dir', type=str, default='visualizations',
                        help='Directory to save visualizations')
     parser.add_argument('--dpi', type=int, default=300,
@@ -79,7 +83,7 @@ def get_args():
     return parser.parse_args()
 
 def create_colormap(name):
-    """Create a colormap for visualization."""
+    """Create a custom colormap for visualization."""
     if name == 'custom':
         # Purple -> Blue -> Green -> Yellow -> Orange
         colors = [(0.5, 0, 0.5), (0, 0, 0.5), (0, 1, 0), (1, 1, 0), (1, 0.5, 0)]
@@ -89,10 +93,10 @@ def create_colormap(name):
 
 def create_input_positions(pattern, grid_size, custom_coords=None):
     """
-    Create input position tensor with a specific pattern.
+    Generate input position tensor with a specific pattern for visualization.
     
     Args:
-        pattern (str): Pattern name ('single', 'double', 'corner', 'diagonal', or 'custom')
+        pattern (str): Pattern name ('single', 'double', 'corner', 'diagonal', 'custom')
         grid_size (int): Size of the grid
         custom_coords (list): List of row,col coordinates for custom pattern
         
@@ -105,14 +109,14 @@ def create_input_positions(pattern, grid_size, custom_coords=None):
         # Single point in the middle-left area
         positions[grid_size//2, grid_size//4] = 1.0
     elif pattern == 'double':
-        # Two points
+        # Two points for comparative analysis
         positions[grid_size//4, grid_size//4] = 1.0
         positions[grid_size//4, 3*grid_size//4] = 1.0
     elif pattern == 'corner':
-        # Point in the corner
+        # Point in the corner to test boundary representations
         positions[0, 0] = 1.0
     elif pattern == 'diagonal':
-        # Points on the diagonal
+        # Points on the diagonal to test spatial correlations
         for i in range(grid_size):
             positions[i, i] = 1.0
     elif pattern == 'custom' and custom_coords:
@@ -128,15 +132,19 @@ def create_input_positions(pattern, grid_size, custom_coords=None):
 
 def apply_rope_and_fft(pos_grid, rope_encoder, head_idx=0):
     """
-    Apply RoPE encoding and FFT to evaluate representation.
+    Apply RoPE encoding and Fast Fourier Transform to analyze frequency representation.
+    
+    This function takes an input position grid, applies RoPE encoding (either Axial or Mixed),
+    and performs 2D FFT to visualize the frequency domain representation. It also performs
+    the inverse FFT to evaluate reconstruction quality.
     
     Args:
         pos_grid (torch.Tensor): Input position grid
-        rope_encoder (nn.Module): RoPE encoder (Axial or Mixed)
-        head_idx (int): Head index to use for Mixed encoding
+        rope_encoder: RoPE encoder instance (Axial or Mixed)
+        head_idx (int): Head index to use for Mixed encoding (ignored for Axial)
         
     Returns:
-        tuple: (frequency representation after FFT, reconstructed positions after iFFT)
+        tuple: (frequency representation after FFT, reconstructed positions after inverse FFT)
     """
     print("Using encoder:", rope_encoder.__class__.__name__)
     grid_size = pos_grid.shape[0]
@@ -151,7 +159,7 @@ def apply_rope_and_fft(pos_grid, rope_encoder, head_idx=0):
     # Flatten the grid to sequence format
     seq = pos_grid.flatten().to(device)  # [seq_len]
     
-    # Get frequency components
+    # Get frequency components based on encoder type
     if isinstance(rope_encoder, RoPEAxial):
         cos, sin = rope_encoder.get_freqs_cis(seq_len, device)
         # Mask the frequencies with input positions
@@ -171,11 +179,11 @@ def apply_rope_and_fft(pos_grid, rope_encoder, head_idx=0):
     # Convert to numpy and mean across frequency dimension
     complex_grid = np.mean(complex_vals.detach().cpu().numpy(), axis=-1).reshape(grid_size, grid_size)
     
-    # Apply 2D FFT
+    # Apply 2D FFT for frequency domain analysis
     fft_result = np.fft.fft2(complex_grid)
     fft_shifted = np.fft.fftshift(fft_result)
     
-    # Apply inverse FFT to see representation quality
+    # Apply inverse FFT to evaluate representation quality
     ifft_result = np.fft.ifft2(fft_result)
     reconstructed = np.abs(ifft_result)
     
@@ -190,16 +198,16 @@ def load_trained_model(model_path, model_config, num_heads=4, dim=64, theta_axia
     Load a trained model to extract its RoPE encoder.
     
     Args:
-        model_path (str): Path to the model checkpoint
-        model_config (str): Positional encoding method
-        num_heads (int): Number of attention heads
-        dim (int): Embedding dimension
-        theta_axial (float): Theta parameter for RoPE-Axial
-        theta_mixed (float): Theta parameter for RoPE-Mixed
-        device (str): Device to load the model on
+        model_path: Path to the model checkpoint
+        model_config: Positional encoding method ('rope-axial' or 'rope-mixed')
+        num_heads: Number of attention heads
+        dim: Embedding dimension
+        theta_axial: Theta parameter for RoPE-Axial
+        theta_mixed: Theta parameter for RoPE-Mixed
+        device: Device to load the model on
         
     Returns:
-        nn.Module: RoPE encoder from the trained model, or None if loading fails
+        RoPE encoder from the trained model, or None if loading fails
     """
     if not os.path.exists(model_path):
         print(f"Error: Model file not found at {model_path}")
@@ -288,83 +296,6 @@ def load_trained_model(model_path, model_config, num_heads=4, dim=64, theta_axia
         print(f"Error loading model: {e}")
         return None
 
-def compare_rope_models(axial_model, mixed_model, input_positions, args, head_idx=0, cmap=None, timestamp=None, model_name="comparison"):
-    """
-    Compare two different RoPE models (Axial and Mixed) side by side.
-    
-    Args:
-        axial_model: The RoPEAxial model to visualize
-        mixed_model: The RoPEMixed model to visualize
-        input_positions (torch.Tensor): Input position grid for visualization
-        args: Command-line arguments containing visualization parameters
-        head_idx (int): Head index to use for Mixed model
-        cmap: Colormap to use for visualization
-        timestamp (str): Timestamp for output filename
-        model_name (str): Base name for output file
-        
-    Returns:
-        str: Path to the saved visualization file
-    """
-    # Apply RoPE and FFT for both models
-    axial_freqs, axial_recon = apply_rope_and_fft(input_positions, axial_model)
-    mixed_freqs, mixed_recon = apply_rope_and_fft(input_positions, mixed_model, head_idx=head_idx)
-    
-    # Create a figure for visualization
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-    
-    # Input positions (shared for both models)
-    axes[0, 0].imshow(input_positions.numpy(), cmap='viridis')
-    axes[0, 0].set_title('Input Positions')
-    axes[0, 0].axis('off')
-    
-    # Axial model results
-    im_axial_freq = axes[0, 1].imshow(axial_freqs, cmap=cmap)
-    axes[0, 1].set_title(f'Axial Frequencies')
-    axes[0, 1].axis('off')
-    
-    axes[0, 2].imshow(axial_recon, cmap='viridis')
-    axes[0, 2].set_title('Axial Reconstruction')
-    axes[0, 2].axis('off')
-    
-    # Mixed model results
-    axes[1, 0].imshow(input_positions.numpy(), cmap='viridis')
-    axes[1, 0].set_title('Input Positions')
-    axes[1, 0].axis('off')
-    
-    im_mixed_freq = axes[1, 1].imshow(mixed_freqs, cmap=cmap)
-    head_title = f'Mixed Head {head_idx}' if hasattr(mixed_model, 'num_heads') and mixed_model.num_heads > 1 else 'Mixed'
-    axes[1, 1].set_title(f'{head_title} Frequencies')
-    axes[1, 1].axis('off')
-    
-    axes[1, 2].imshow(mixed_recon, cmap='viridis')
-    axes[1, 2].set_title('Mixed Reconstruction')
-    axes[1, 2].axis('off')
-    
-    # Add colorbars
-    fig.colorbar(im_axial_freq, ax=axes[0, 1], fraction=0.046, pad=0.04)
-    fig.colorbar(im_mixed_freq, ax=axes[1, 1], fraction=0.046, pad=0.04)
-    
-    # Fine-tune layout
-    plt.tight_layout()
-    
-    # Add figure title
-    pattern_name = "Custom" if not hasattr(input_positions, 'pattern') else input_positions.pattern.capitalize()
-    fig.suptitle(f"RoPE Model Comparison - Pattern: {pattern_name}", fontsize=16, y=1.02)
-    
-    # Save the figure
-    if timestamp is None:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
-    head_suffix = f"_head{head_idx}" if hasattr(mixed_model, 'num_heads') and mixed_model.num_heads > 1 else ""
-    output_path = f"{args.output_dir}/rope_comparison_{model_name}_{pattern_name}{head_suffix}_{timestamp}.png"
-    plt.savefig(output_path, dpi=args.dpi, bbox_inches='tight')
-    print(f"Saved model comparison to {output_path}")
-    
-    # Close the figure to free memory
-    plt.close(fig)
-    
-    return output_path
-
 def visualize_rope_frequencies(args):
     """
     Create visualizations of RoPE frequency representations.
@@ -382,45 +313,14 @@ def visualize_rope_frequencies(args):
     # Get colormap
     cmap = create_colormap(args.cmap)
     
-    # Handle different model loading scenarios
-    model_name = "default"
-    
-    # Check if explicit axial and mixed models are provided
-    if args.axial_model and args.mixed_model:
-        print(f"Loading Axial model from: {args.axial_model}")
-        print(f"Loading Mixed model from: {args.mixed_model}")
-        
-        rope_axial = load_trained_model(
-            model_path=args.axial_model,
-            model_config='rope-axial',
-            num_heads=args.num_heads,
-            dim=args.dim,
-            theta_axial=args.theta_axial,
-            theta_mixed=args.theta_mixed,
-            device=device
-        )
-        
-        rope_mixed = load_trained_model(
-            model_path=args.mixed_model,
-            model_config='rope-mixed',
-            num_heads=args.num_heads,
-            dim=args.dim,
-            theta_axial=args.theta_axial,
-            theta_mixed=args.theta_mixed,
-            device=device
-        )
-        
-        if rope_axial is None or rope_mixed is None:
-            print("One or both models failed to load. Exiting without visualization.")
-            return
-        
-        model_name = "comparison"
-        use_both_encoders = True
-    
-    # Handle single model loading
-    elif args.load_model and args.model_path:
+    # Get model basename for output filename
+    if args.load_model and args.model_path:
         model_name = os.path.splitext(os.path.basename(args.model_path))[0]
-        
+    else:
+        model_name = "default"
+    
+    # Set up RoPE encoders
+    if args.load_model and args.model_path:
         # Load encoders from trained model
         encoder = load_trained_model(
             model_path=args.model_path, 
@@ -450,41 +350,7 @@ def visualize_rope_frequencies(args):
         rope_axial = RoPEAxial(dim=args.dim, theta=args.theta_axial).to(device)
         rope_mixed = RoPEMixed(dim=args.dim, num_heads=args.num_heads, theta=args.theta_mixed).to(device)
         use_both_encoders = True
-
-    # Add new argument to indicate if we should use the comparison function
-    if hasattr(args, 'compare_models') and args.compare_models and use_both_encoders:
-        # Use the new comparison function for each pattern
-        for pattern in args.patterns:
-            # Handle custom pattern
-            if pattern == 'custom' and args.custom_pattern:
-                custom_coords = args.custom_pattern.split(',')
-                input_positions = create_input_positions(pattern, args.grid_size, custom_coords)
-            else:
-                input_positions = create_input_positions(pattern, args.grid_size)
-            
-            # Store the pattern name for reference
-            input_positions.pattern = pattern
-            
-            # For Mixed, compare for each specified head
-            for head_idx in args.head_indices:
-                if hasattr(rope_mixed, 'num_heads') and head_idx >= rope_mixed.num_heads:
-                    continue
-                
-                compare_rope_models(
-                    axial_model=rope_axial,
-                    mixed_model=rope_mixed,
-                    input_positions=input_positions,
-                    args=args,
-                    head_idx=head_idx,
-                    cmap=cmap,
-                    timestamp=timestamp,
-                    model_name=model_name
-                )
-        
-        # If comparison mode is active and both models are available, return after comparison
-        if rope_axial is not None and rope_mixed is not None:
-            return
-
+    
     # Process each test position pattern
     for pattern in args.patterns:
         # Handle custom pattern
@@ -667,7 +533,15 @@ def visualize_rope_frequencies(args):
         visualize_theta_comparison(args, cmap, timestamp, model_name)
 
 def visualize_theta_comparison(args, cmap, timestamp, model_name="default"):
-    """Create visualizations comparing different theta values for RoPE."""
+    """
+    Compare different theta values for RoPE frequency patterns.
+    
+    Args:
+        args: Command-line arguments
+        cmap: Colormap for visualization
+        timestamp: Timestamp for output filename
+        model_name: Name of the model for output filename
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Use the first pattern for comparison
@@ -733,6 +607,130 @@ def visualize_theta_comparison(args, cmap, timestamp, model_name="default"):
     print(f"Saved theta comparison to {output_path}")
     plt.close(fig)
 
+def visualize_model_comparison(args):
+    """
+    Compare RoPE-Axial and RoPE-Mixed models side by side.
+    
+    Args:
+        args: Command-line arguments with visualization parameters
+    """
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Set up device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Get colormap
+    cmap = create_colormap(args.cmap)
+    
+    # Load RoPE-Axial model
+    rope_axial = load_trained_model(
+        model_path=args.axial_model_path, 
+        model_config='rope-axial', 
+        num_heads=args.num_heads, 
+        dim=args.dim, 
+        theta_axial=args.theta_axial, 
+        device=device
+    )
+    
+    if rope_axial is None:
+        print("Failed to load RoPE-Axial model. Exiting without visualization.")
+        return
+    
+    # Load RoPE-Mixed model
+    rope_mixed = load_trained_model(
+        model_path=args.mixed_model_path, 
+        model_config='rope-mixed', 
+        num_heads=args.num_heads, 
+        dim=args.dim, 
+        theta_mixed=args.theta_mixed, 
+        device=device
+    )
+    
+    if rope_mixed is None:
+        print("Failed to load RoPE-Mixed model. Exiting without visualization.")
+        return
+    
+    print(f"Successfully loaded both models for comparison")
+    axial_name = os.path.splitext(os.path.basename(args.axial_model_path))[0]
+    mixed_name = os.path.splitext(os.path.basename(args.mixed_model_path))[0]
+    
+    # Process each test position pattern
+    for pattern in args.patterns:
+        # Handle custom pattern
+        if pattern == 'custom' and args.custom_pattern:
+            custom_coords = args.custom_pattern.split(',')
+            input_positions = create_input_positions(pattern, args.grid_size, custom_coords)
+        else:
+            input_positions = create_input_positions(pattern, args.grid_size)
+        
+        # Get Axial frequencies and reconstruction
+        axial_freqs, axial_recon = apply_rope_and_fft(input_positions, rope_axial)
+        
+        # For each requested head in the Mixed model
+        for head_idx in args.head_indices:
+            # Get Mixed frequencies and reconstruction
+            mixed_freqs, mixed_recon = apply_rope_and_fft(input_positions, rope_mixed, head_idx=head_idx)
+            
+            # Create a figure with 6 subplots for side-by-side comparison
+            fig, axes = plt.subplots(1, 6, figsize=(24, 4))
+            
+            # Plot input positions
+            axes[0].imshow(input_positions.numpy(), cmap='viridis')
+            axes[0].set_title('Input Positions')
+            axes[0].axis('off')
+            
+            # Add FFT & iFFT arrow
+            axes[1].axis('off')
+            axes[1].text(0.5, 0.5, 'FFT\n&\niFFT', ha='center', va='center', fontsize=14)
+            axes[1].set_title('')
+            
+            # Plot Axial frequencies
+            im_axial = axes[2].imshow(axial_freqs, cmap=cmap)
+            axes[2].set_title(f'Axial')
+            axes[2].axis('off')
+            
+            # Plot Mixed frequencies
+            im_mixed = axes[3].imshow(mixed_freqs, cmap=cmap)
+            head_title = f'Mixed Head {head_idx}' if len(args.head_indices) > 1 else 'Mixed'
+            axes[3].set_title(f'{head_title}')
+            axes[3].axis('off')
+            
+            # Add visualization of Axial reconstruction
+            axes[4].imshow(axial_recon, cmap='viridis')
+            axes[4].set_title('Axial Reconstruction')
+            axes[4].axis('off')
+            
+            # Add visualization of Mixed reconstruction
+            axes[5].imshow(mixed_recon, cmap='viridis')
+            axes[5].set_title('Mixed Reconstruction')
+            axes[5].axis('off')
+            
+            # Add colorbars
+            fig.colorbar(im_axial, ax=axes[2], fraction=0.046, pad=0.04)
+            fig.colorbar(im_mixed, ax=axes[3], fraction=0.046, pad=0.04)
+            
+            # Fine-tune layout
+            plt.tight_layout()
+            
+            # Add figure title
+            fig.suptitle(f"RoPE Model Comparison - Pattern: {pattern.capitalize()}\nAxial: {axial_name}, Mixed: {mixed_name}", 
+                        fontsize=14, y=1.05)
+            
+            # Save the figure
+            head_suffix = f"_head{head_idx}" if len(args.head_indices) > 1 else ""
+            output_path = f"{args.output_dir}/rope_comparison_{pattern}{head_suffix}_{timestamp}.png"
+            plt.savefig(output_path, dpi=args.dpi, bbox_inches='tight')
+            print(f"Saved model comparison for '{pattern}' pattern (head {head_idx}) to {output_path}")
+            
+            # Close the figure to free memory
+            plt.close(fig)
+
 if __name__ == "__main__":
     args = get_args()
-    visualize_rope_frequencies(args) 
+    
+    if args.compare_models and args.axial_model_path and args.mixed_model_path:
+        visualize_model_comparison(args)
+    else:
+        visualize_rope_frequencies(args) 
