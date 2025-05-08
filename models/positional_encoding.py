@@ -154,7 +154,7 @@ class PolynomialRPE(nn.Module):
             # poly_features shape: [num_patches, num_patches, degree+1]
             # coefficients shape: [num_heads, degree+1]
             
-            # Method 1: Loop through each head (more readable but less efficient)
+            # Method 1: Loop through each head\
             bias = torch.zeros(self.num_heads, self.num_patches, self.num_patches, 
                               device=self.coefficients.device)
             

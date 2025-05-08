@@ -9,3 +9,5 @@ visualizations/
 report/
 results/
 venv/
+.DS_Store
+report.tex
